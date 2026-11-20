@@ -1,0 +1,1 @@
+# solarscope_hamburg
