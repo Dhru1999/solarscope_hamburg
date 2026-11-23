@@ -1,4 +1,3 @@
-# 📘 LEARNING.md
 ### *The things this project taught me, told as plot twists*
 ---
 
