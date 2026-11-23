@@ -1,156 +1,240 @@
-### *The things this project taught me, told as plot twists*
+# Learning log: SolarScope Hamburg
+
+My notes while building this project, step by step. What I did, what went wrong,
+how I fixed it, and what I learned.
+
+(Written from my code, my code comments and my commits, so I don't forget.)
+
 ---
 
-## 🗺️ The journey in one picture
+## Step 1: Loading the data into Databricks
 
+**What I did:** uploaded the roof CSV and the district GeoJSON to a Databricks
+Volume and read them with Spark.
+
+**Problems:**
+- The CSV uses `;` and not `,` as separator, so I had to set `sep=';'`.
+- The GeoJSON is one big object (a FeatureCollection), not one row per line.
+  Spark needs `option("multiLine", "true")` to read it.
+- Then all districts were inside one `features` array. I used `F.explode("features")`
+  to get one row per district.
+
+**Learned:** before reading a file, open it and look at how it is built.
+
+---
+
+## Step 2: Bronze table, fixing the column types
+
+**Problem:** all columns came in as text (string), also the numbers.
+
+**What I did:** converted them to numbers in a loop. I used `try_cast` and not
+`cast`, because with `try_cast` a bad value becomes `NULL` and the job doesn't crash.
+
+**Problem:** the id column `_fid` had characters that are not numbers.
+
+**Fix:** removed everything that is not a digit with `regexp_replace`, cast it to
+int and renamed it to `id`.
+
+**Learned:** `printSchema()` and `show()` first, always. Then fix.
+
+**Note to myself:** I did these fixes *before* saving Bronze. Strictly, Bronze
+should be the raw data and the fixes belong in Silver. I'll do it like that next time.
+
+---
+
+## Step 3: Silver table, cleaning
+
+**What I did:**
+- The suitability column `eignung` was long German text like
+  *"Eignung 1 (geeignet, sehr hohe Einstrahlung)"*. I turned it into numbers with
+  `CASE WHEN` and renamed it `suitability_class`.
+- Removed class 0 (bad data quality) and class 8 (no building, only ground).
+- Found roofs with area over 100,000 m², which is impossible for one roof, so I removed them.
+- Dropped `coordinate_reference_system`, because it was always the same value.
+- `dropDuplicates()` just to be safe.
+
+**Learned:** print row counts before and after cleaning, so you know how much you removed.
+
+---
+
+## Step 4: Which district is each roof in? (the hardest part for me)
+
+**Problem 1:** roofs and districts don't use the same coordinate system.
+Roofs are in metres (EPSG:25832), districts in degrees (WGS84).
+You can't compare them like this.
+
+**Fix:** transformed the districts with `pyproj`. Only 104 districts, so that's much
+faster than transforming 864k roofs. I needed `always_xy=True`, otherwise
+the order of latitude and longitude can get mixed up.
+
+**Problem 2:** checking 864k roofs one by one is too slow.
+
+**Fix:** took the centre point of each roof and used `shapely.STRtree`
+(a spatial index), so all points are checked in one go.
+
+**Problem 3:** some roofs had no district after the join. Their centre point was
+exactly on a district border.
+
+**Fix:** for those roofs I took the nearest district (max 500 m). Then I checked
+again: roofs without district = 0.
+
+**Also needed:** `%pip install shapely pyproj` in the notebook first.
+
+**Learned:** geo data is not "just columns". Always check the coordinate system first.
+
+---
+
+## Step 5: Gold table
+
+Grouped everything by district with SQL: number of roofs, total power,
+suitable power (classes 1–3), suitable roofs, PV area. Exported it as a small
+CSV (`solar_districts.csv`, 103 rows) for the app.
+
+**Something I didn't expect:** only 53% of the roofs are suitable, but they
+have 90% of the power. Big roofs make the difference.
+
+---
+
+## Step 6: First model (v1), and why it was wrong
+
+**What I did:** HistGradientBoosting with a random 80/20 split. I already left out
+the output columns like `power` and `pvarea`, because they come from the same
+analysis as the label.
+
+**Problem:** I still used `schattena` and `percentmsa`, which are radiation values.
+But the suitability class is basically *calculated from* radiation. So the model
+could almost read the answer. That's cheating, not learning.
+
+**Second problem:** with a random split, roofs from the same district are in train
+and test. Neighbour roofs are very similar, so the score looks better than it is.
+
+**Learned:** for every feature, ask "Would a normal person know this before?"
+If not, don't use it.
+
+---
+
+## Step 7: Second model (v2)
+
+**What I changed:**
+- only features a homeowner knows: size, direction, tilt, shading, roof type, district
+- Random Forest (100 trees, max depth 12)
+- split **by district**: every 5th district is only for testing (21 districts)
+
+**Result:** train 694,689 roofs, test 169,669 roofs →
+accuracy 0.88, macro F1 0.863.
+
+**Then I checked what the model learned** (feature importance):
+shading 59.5%, direction 24.5%, tilt 9.7%, roof type 3.4%, size 2.4%, district 0.3%.
+That makes sense physically. District is almost 0, so it really learned roofs
+and not neighbourhoods.
+
+**Learned:** don't only look at the score. Look inside the model too.
+
+---
+
+## Step 8: MLflow and Unity Catalog
+
+**Error:** `Registered Model ... not found`, even though the model was registered.
+
+**Why:** MLflow was looking in the old workspace registry, not in Unity Catalog.
+
+**Fix:** one line before loading:
+```python
+mlflow.set_registry_uri("databricks-uc")
 ```
- RAW DATA ──► CLEAN ──► LOCATE ──► SUMMARISE ──► PREDICT ──► SHOW
-    │           │          │           │            │          │
- "it's just  "which    "two maps    "a count    "my model   "a button
-  a CSV"     rows are   that don't   and a sum   was too     can erase
-             real       agree"       tell        good"       my results"
-             roofs?"                 different
-                                     stories"
-```
+
+**Something new:** when I ran the v2 cell again, it registered a **new version (3)**.
+Every registration creates a new version. My app uses version 2 fixed in the
+URI, so nothing changed in the app.
+
+**Learned:** always use a fixed model version in the app.
 
 ---
 
-## 🎬 Plot twist #1: *My model was too good to be honest*
+## Step 9: Building the Streamlit app
 
-**What I believed:** more features → better model. v1 used every
-reasonable-looking column, including the radiation values `schattena` and `percentmsa`.
+**What I did:** a multipage app. `Home.py` is the start file, and every file in
+`pages/` becomes a page in the sidebar automatically (Map, My roof, Insights).
 
-**What I realised:** the suitability class (*Eignung*) is basically **calculated
-from radiation**. Giving the model radiation is like letting a student revise
-with the answer sheet on the desk. The score looks great, but nothing is learned.
-
-**What I do now** (model v2, notebook cell 25): only features a homeowner knows
-*before* a solar study: size, direction, tilt, shading, roof type, district.
-
-**🔑 My rule from now on:**
-> *"Would I actually have this value at the moment I need the prediction?"*
-> If not, it's leakage, no matter how much it helps the score.
+**Small things I learned on the way:**
+- `st.set_page_config` must be the **first** Streamlit command.
+- `@st.cache_resource`: the model loads once, not on every click.
+- Build file paths from `__file__`, so it works from any folder.
+- Put a `try/except` around the model and show `st.error`, so the app shows
+  a message instead of crashing.
+- I kept the old `app.py` as an empty file, so old links don't break.
 
 ---
 
-## 🎬 Plot twist #2: *A random split let my model recognise neighbourhoods*
+## Step 10: Bug: results disappear when moving the slider
 
-Roofs in the same district are siblings: same era, same streets, same trees.
-With a random 80/20 split, the test roofs had "siblings" in the training set.
+**Problem:** on *My roof*, after clicking "Check my roof", when I moved the
+electricity price slider, all results were gone.
 
-**v2 holds out whole districts** (every 5th, alphabetically: 21 districts). Now the
-test asks the honest question: *"Does this work in a part of the city you've never seen?"*
+**Why:** Streamlit runs the whole script again on every change. The slider was
+inside `if st.button(...)`, and on the new run the button is `False` again.
 
-**🔑 Lesson:** The test split should copy how the model will be used in real life.
-A homeowner from a new area doesn't care how well I did on their neighbours.
+**Fix:** save the prediction and the roof values in `st.session_state` and show
+the results outside the button block. Now the savings change live with the
+slider and the prediction stays.
 
----
-
-## 🎬 Plot twist #3: *Two maps of the same city didn't agree*
-
-| | Roofs | Districts |
-| --- | --- | --- |
-| System | EPSG:25832 | WGS84 (EPSG:4326) |
-| Unit | metres | degrees |
-
-Until both use the same system, "is this roof inside this district?" is meaningless.
-
-**What I did** (notebook cell 16):
-- reprojected the **104 districts** instead of **864k roofs**: same result, far
-  less work
-- used `always_xy=True` so pyproj doesn't silently swap latitude and longitude
-- built a `shapely.STRtree` so the matching happens in one vectorised query,
-  not 864k loops
-
-**The edge case:** a roof whose centre sits *exactly on a border* belongs to no
-district. Fix: assign the **nearest district within 500 m**, then **check** that every
-roof has one (`roofs without district` is printed).
-
-**A simplification I chose on purpose:** I matched each roof's *centre point*, so a
-roof crossing a border counts for one district only.
+**Learned:** a button is only `True` for one run. If something should stay, save it.
 
 ---
 
-## 🎬 Plot twist #4: *Half the roofs, 90% of the power*
+## Step 11: Git problem with MLflow
 
-When I aggregated the Gold table, two numbers didn't fit my intuition:
+**Problem:** the MLflow experiment folder `solar_suitability_model` should not go
+into Git. I wrote it in `.gitignore` with a `/` at the end, but that only works for
+normal folders, and the experiment is not a normal folder.
 
-- **53%** of roof faces are suitable
-- they hold **90%** of the potential peak power
-
-And one average roof face in **Altenwerder** (port) has about **16×** the
-potential of one in **Blankenese**.
-
-**🔑 Lesson:** *counts* and *sums* tell different stories. That's why the Insights
-page shows both a **share** of suitable roofs and **total** power. Neither one
-alone gives the full picture.
+**Fix:** removed the trailing slash (commit "Fix .gitignore…").
 
 ---
 
-## 🎬 Plot twist #5: *My "raw" layer isn't fully raw*
+## Step 12: The app said things the notebook didn't show
 
-The medallion idea is simple:
+When I checked my repo, I found mismatches:
+- The Home page said, "trained on 864,358 roofs". That's all the data, not the
+  training data.
+- The Home page called the Bronze table `solar_raw_csv`, but in the notebook it is `solar_raw`.
+- The app showed 88% accuracy, but the v2 cell didn't log anything to MLflow.
 
-| 🥉 Bronze | 🥈 Silver | 🥇 Gold |
-| --- | --- | --- |
-| keep everything as delivered | clean, trusted rows | answers, one row per district |
+**Fix:** The v2 cell now logs parameters and metrics to MLflow and registers
+the model. The Home page now says 694,689 train / 169,669 test, and the table
+name is corrected.
 
-**The idea behind it:** if I find a cleaning mistake later, I rebuild Silver and
-Gold. I never re-download.
-
-**Honest review of my own code:** I cast types and cleaned the id *before*
-saving Bronze. In a strict setup, Bronze stays untouched and casting happens in Silver.
-It works, but next time I'll keep Bronze pure.
-
----
-
-## 🎬 Plot twist #6: *A button can erase your results*
-
-On the **My roof** page, the electricity-price slider sits *inside*
-`if st.button(...)`. Streamlit reruns the whole script on every widget change, and
-on that rerun the button is `False` again. Move the slider and the results vanish.
-
-**🔑 Lesson:** in Streamlit, a button is a *moment*, not a *state*. To keep
-results, store them in `st.session_state`, or put the dependent widgets outside
-the button block.
-
-*(Found while reviewing my own code; not fixed yet. See the to-do list.)*
+**Learned:** every number in the app needs a place where it comes from.
 
 ---
 
-## 🧰 Small things that saved me time
+## Step 13: Making the app public (Streamlit Community Cloud)
 
-| Trick | Where | Why it matters |
-| --- | --- | --- |
-| `try_cast` instead of `cast` | cell 5 | bad values become `NULL` instead of crashing the job |
-| `mlflow.set_registry_uri("databricks-uc")` | `2_My_Roof.py` | without it MLflow says *"model not found"*, even though the model exists in Unity Catalog |
-| `@st.cache_resource` | `2_My_Roof.py` | load the model once, not on every click |
-| paths built from `__file__` | all pages | the app runs from any folder |
-| `st.set_page_config` first | `Home.py` | it must be the first Streamlit command |
-| small CSV export in `assets/` | Map, Insights | 2 of 3 pages work without Databricks |
-| `try/except` + `st.error` | `2_My_Roof.py` | a clear message instead of a crash |
-| no trailing slash in `.gitignore` | last commit | the MLflow experiment isn't a plain folder, and a trailing slash only matches directories |
-| keep `app.py` as a stub | `app.py` | moving to a multipage app didn't break old links |
+**Problem:** On Databricks, the app worked, but only for people with access.
+On Streamlit Cloud, "My roof" can't load the model because there is no
+connection to Unity Catalog.
 
-## ❓ Things I don't know yet (and want to find out)
+**Fix:**
+- exported the v2 model as a file: `assets/solar_suitability_model.joblib` (11.6 MB)
+- checked that it gives the same predictions as the model from Unity Catalog
+- in the app: try Unity Catalog first, and if that fails, load the file
+- added `streamlit` and `joblib` to `requirements.txt`
 
-- **Why** are the villa districts (Blankenese, Rissen, Nienstedten) so low on suitable
-  roofs? Trees? Roof shapes? → compare the average `schatten` and `slope` per district.
-- **Why** do port districts have such huge roofs? → check roof area distributions.
-- **Which suitability class** does my model confuse most? → per-class report and
-  confusion matrix for v2.
-- **Does it travel?** Would a model trained on Hamburg work for another German city?
+Now it's live: https://solarscopehamburg-o97rjf53ukjsbdkgzyzcqe.streamlit.app/
+
+**Learned:** The registry is for managing the model, and a file is for
+taking it somewhere else.
 
 ---
 
-## ✅ To-do list (from reviewing my own work)
+## Still open/next time
 
-- [ ] Commit the cell that logs and registers **model v2** and save its metrics
-- [ ] Fix the Home page wording: training uses the district split, not all 864,358 roofs
-- [ ] Align table names (`solar_raw_csv` on the Home page vs `solar_raw` in the notebook)
-- [ ] Move the price slider out of the button block/use `st.session_state.`
-- [ ] Add `streamlit` to `requirements.txt` for running outside Databricks
-- [ ] Rename the notebook (*Ingetion* → *Ingestion*) and split it in two
-- [ ] Replace the bubble map with a filled choropleth from the district GeoJSON
-- [ ] Add data source links and licence to the README
-- [ ] 🇩🇪 Extend from Hamburg to all German states
+- [ ] Save the notebook with outputs (right now the outputs are not in the repo)
+- [ ] Write the exact `scikit-learn` version in `requirements.txt`, so the model file still loads after updates
+- [ ] Keep Bronze really raw, and do the type fixes in Silver
+- [ ] Look at which class the model mixes up most (confusion matrix for v2)
+- [ ] Why do villa districts like Blankenese have so few suitable roofs? Trees? Check shading per district.
+- [ ] Rename the notebook (typo:* Ingestion*) and split it into pipeline and model
+- [ ] Map with real district shapes instead of bubbles
+- [ ] Add the data source links
+- [ ] Later: all German states, not only Hamburg
