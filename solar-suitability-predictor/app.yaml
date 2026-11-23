@@ -1,0 +1,6 @@
+# WHY Home.py?: the app is a Streamlit "multipage app": Home.py is the entry
+# point and every file in pages/ automatically becomes a sidebar page.
+command:
+  - streamlit
+  - run
+  - Home.py

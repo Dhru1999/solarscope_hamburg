@@ -1,0 +1,3 @@
+# MLflow writes its experiment artifacts (run logs, plots, model files) here.
+# They are tracked by MLflow and Unity Catalog, not by Git.
+solar_suitability_model/
