@@ -1,6 +1,5 @@
 import os
 
-import mlflow
 import pandas as pd
 import streamlit as st
 
@@ -13,19 +12,31 @@ ASSETS = os.path.join(HERE, "..", "assets")
 
 # WHY version 2?: v2 was trained WITHOUT the radiation columns (they leaked the
 # answer - see Home.py) and tested on districts the model had never seen.
+# WHY two sources?: on Databricks the model comes from Unity Catalog (versioned,
+# tracked with MLflow). On Streamlit Community Cloud there is no Databricks
+# connection, so the SAME pipeline (exported from UC version 2) is bundled in
+# assets/ and loaded from disk instead.
 MODEL_URI = "models:/workspace.default.solar_suitability_model/2"
+MODEL_FILE = os.path.join(ASSETS, "solar_suitability_model.joblib")
 
 
 # NEED: loading the model takes a few seconds. @st.cache_resource keeps it in
 # memory, so it is loaded once - not again on every button click.
-@st.cache_resource(show_spinner="Loading the model from Unity Catalog ...")
+@st.cache_resource(show_spinner="Loading the model ...")
 def load_model():
-    # NEED: tell MLflow to use the UNITY CATALOG registry ("databricks-uc").
-    # Without this line MLflow searches the old workspace registry, where our
-    # model does not exist - and reports "Registered Model ... not found"
-    # even though the model is safely registered in Unity Catalog.
-    mlflow.set_registry_uri("databricks-uc")
-    return mlflow.pyfunc.load_model(MODEL_URI)
+    try:
+        import mlflow
+        # NEED: tell MLflow to use the UNITY CATALOG registry ("databricks-uc").
+        # Without this line MLflow searches the old workspace registry, where our
+        # model does not exist - and reports "Registered Model ... not found"
+        # even though the model is safely registered in Unity Catalog.
+        mlflow.set_registry_uri("databricks-uc")
+        return mlflow.pyfunc.load_model(MODEL_URI)
+    except Exception:
+        # no Databricks connection (e.g. Streamlit Community Cloud) - load the
+        # identical pipeline exported next to the app's assets
+        import joblib
+        return joblib.load(MODEL_FILE)
 
 
 # readable labels for the predicted class number (same wording as the source data)
