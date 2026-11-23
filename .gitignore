@@ -1,3 +1,4 @@
 # MLflow writes its experiment artifacts (run logs, plots, model files) here.
 # They are tracked by MLflow and Unity Catalog, not by Git.
-solar_suitability_model/
+# No trailing slash: the experiment is a workspace object, not a plain directory.
+solar_suitability_model
