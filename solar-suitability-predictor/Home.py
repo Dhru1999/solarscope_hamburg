@@ -27,7 +27,7 @@ st.markdown(
     """
 | Layer | Table | What it contains |
 | --- | --- | --- |
-| 🥉 Bronze | `solar_raw_csv` | the raw CSV upload, exactly as delivered |
+| 🥉 Bronze | `solar_raw` | the raw CSV upload (typed columns), exactly as delivered |
 | 🥈 Silver | `solar_roofs_with_district` | cleaned roof faces + their Hamburg district |
 | 🥇 Gold | `solar_gold` | one summary row per district (power, area, counts) |
 | 📦 Assets | `assets/solar_districts.csv` | a *small* export of the Gold table for this app |
@@ -40,15 +40,18 @@ is rebuilt - the raw data is never lost.
 st.subheader("The ML model behind \"My roof\"")
 st.markdown(
     """
-- A **Random Forest classifier** trained on **864,358** Hamburg roof faces.
+- A **Random Forest classifier** trained on **694,689** Hamburg roof faces
+  (the other 169,669 were held out for testing).
 - Predicts the suitability class (Eignung 1 / 2 / 3 / 6) from features a roof
   owner knows beforehand: **size, direction, tilt, shading, roof type and district**.
 - **Deliberately NOT used:** radiation columns - they are computed *from* the
   same analysis that assigns the class, so using them would leak the answer
   (like revising with the answer sheet on the desk).
-- Tested on **21 districts the model never saw**: 88% accuracy, 0.86 macro F1.
+- Tested on **21 districts the model never saw** (169,669 roof faces): 88% accuracy, 0.86 macro F1.
 - Tracked with **MLflow** and registered in **Unity Catalog** as
-  `workspace.default.solar_suitability_model` version 2.
+  `workspace.default.solar_suitability_model` (this app runs **version 2**, the
+  radiation-free retrain - its training cell and saved results live in the
+  project notebook).
 """
 )
 

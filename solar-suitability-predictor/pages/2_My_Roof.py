@@ -63,6 +63,9 @@ with right:
     stadtteil = st.selectbox("District (Stadtteil)", district_names)
 
 # --- step 2: predict the suitability class ------------------------------------
+# WHY session_state?: Streamlit reruns this whole script on EVERY input change.
+# Storing the result means the prediction survives moving the price slider below
+# (it used to vanish until "Check my roof" was clicked again).
 if st.button("Check my roof", type="primary", use_container_width=True):
     # the model expects a DataFrame with EXACTLY the training columns
     input_df = pd.DataFrame(
@@ -74,20 +77,35 @@ if st.button("Check my roof", type="primary", use_container_width=True):
     except Exception as e:  # e.g. Databricks access problem - show a clear message, not a crash
         st.error(f"Could not load or run the model: {e}")
         st.stop()
+    # remember the prediction AND the roof inputs it belongs to
+    st.session_state["prediction"] = prediction
+    st.session_state["roof"] = dict(
+        area=area, aspect=aspect, aufstd=aufstd,
+        slope=slope, schatten=schatten, stadtteil=stadtteil,
+    )
+
+# WHY outside the button block?: this reruns on every slider move, so the
+# savings update live when the electricity price changes - without losing the
+# prediction.
+if "prediction" in st.session_state:
+    prediction = st.session_state["prediction"]
+    roof = st.session_state["roof"]
 
     st.success(f"Predicted suitability: **{CLASS_LABELS.get(prediction, prediction)}**")
 
     # --- step 3: the rule-of-thumb calculator ----------------------------------
     # WHY rules of thumb?: a real yield calculation needs an engineer and shading
     # measurements. These three constants give a good, honest rough estimate.
+    # WHY roof[...]?: the estimate must stay tied to the roof the prediction was
+    # made for, even if an input field is changed afterwards.
     M2_PER_KWP = 6.0     # about 6 m² of roof per installed kWp (typical module + spacing)
     KWH_PER_KWP = 950.0  # a kWp of panels in Hamburg produces roughly 950 kWh per year
     CO2_KG_PER_KWH = 0.4  # German electricity mix: ~0.4 kg CO2 per kWh produced
 
-    kwp = area / M2_PER_KWP               # possible peak power on this roof
-    kwh_per_year = kwp * KWH_PER_KWP      # rough yearly production
+    kwp = roof["area"] / M2_PER_KWP            # possible peak power on this roof
+    kwh_per_year = kwp * KWH_PER_KWP           # rough yearly production
     price = st.slider("Your electricity price (€ per kWh)", 0.10, 0.60, 0.35, 0.01)
-    savings = kwh_per_year * price        # money not paid to the utility
+    savings = kwh_per_year * price             # money not paid to the utility
     co2_tons = kwh_per_year * CO2_KG_PER_KWH / 1000  # CO2 avoided vs. grid power
 
     c1, c2, c3 = st.columns(3)
@@ -98,5 +116,6 @@ if st.button("Check my roof", type="primary", use_container_width=True):
 
     st.caption(
         "Rough estimates only - a real offer needs an on-site inspection. "
-        "The prediction uses only size, direction, tilt, shading and roof type."
+        "The prediction uses only size, direction, tilt, shading and roof type, "
+        "and reflects the values entered when you clicked \"Check my roof\"."
     )
